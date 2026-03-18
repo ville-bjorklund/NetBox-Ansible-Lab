@@ -1,0 +1,175 @@
+---
+# 02_bootstrap.yml
+# Play 1: SSH to the VM, generate an API token via nbshell.
+# Play 2: Run on localhost, use the token to populate NetBox via its API.
+#
+# Prerequisites on hogberg:
+#   ansible-galaxy collection install netbox.netbox
+
+# ── Play 1: Generate token on the VM ─────────────────────────────────────────
+
+- name: Generate NetBox API token
+  hosts: ville_netbox
+  become: yes
+
+  vars:
+    netbox_docker_dir: /opt/netbox-docker
+    nb_admin_user: "admin"
+    nb_admin_pw: "Admin123!"
+
+  tasks:
+
+    - name: Write token generation script to VM
+      copy:
+        dest: /tmp/nb_gen_token.py
+        mode: "0644"
+        content: |
+          from users.models import User, Token
+          u, _ = User.objects.get_or_create(
+              username='{{ nb_admin_user }}',
+              defaults={'is_superuser': True, 'is_staff': True}
+          )
+          u.set_password('{{ nb_admin_pw }}')
+          u.save()
+          Token.objects.filter(user=u).delete()
+          t = Token.objects.create(user=u)
+          print('TOKEN:' + t.key)
+
+    - name: Generate API token via nbshell
+      shell: |
+        docker compose exec -T netbox \
+          /opt/netbox/netbox/manage.py nbshell < /tmp/nb_gen_token.py
+      args:
+        chdir: "{{ netbox_docker_dir }}"
+      register: token_raw
+      changed_when: false
+
+    - name: Extract token from nbshell output
+      set_fact:
+        nb_token: >-
+          {{
+            token_raw.stdout_lines
+            | select('search', 'TOKEN:[0-9a-f]+')
+            | list | first
+            | regex_replace('^.*TOKEN:', '')
+            | trim
+          }}
+
+    - name: Verify token is valid (40 lowercase hex chars)
+      fail:
+        msg: |
+          Token extraction failed.
+          Extracted value: '{{ nb_token }}'
+          Full nbshell output:
+          {{ token_raw.stdout }}
+      when: >
+        nb_token | length != 40
+        or nb_token is not match('^[0-9a-f]+$')
+
+    - name: Show token
+      debug:
+        msg: "API token: {{ nb_token }}"
+
+# ── Play 2: Populate NetBox from localhost ────────────────────────────────────
+
+- name: Populate NetBox with lab data
+  hosts: localhost
+  connection: local
+  become: no
+
+  vars:
+    nb_url: "http://192.168.90.160:8000"
+    nb_token: "{{ hostvars['ville-netbox-vm']['nb_token'] }}"
+
+  tasks:
+
+    - name: Create Lab Site
+      netbox.netbox.netbox_site:
+        netbox_url: "{{ nb_url }}"
+        netbox_token: "{{ nb_token }}"
+        data:
+          name: "Main Lab"
+          slug: "main-lab"
+        state: present
+
+    - name: Create Manufacturer
+      netbox.netbox.netbox_manufacturer:
+        netbox_url: "{{ nb_url }}"
+        netbox_token: "{{ nb_token }}"
+        data:
+          name: "Generic"
+          slug: "generic"
+        state: present
+
+    - name: Create Device Roles
+      netbox.netbox.netbox_device_role:
+        netbox_url: "{{ nb_url }}"
+        netbox_token: "{{ nb_token }}"
+        data:
+          name: "{{ item.name }}"
+          slug: "{{ item.slug }}"
+          color: "{{ item.color }}"
+        state: present
+      loop:
+        - { name: "Core Switch",    slug: "core-switch",    color: "2196f3" }
+        - { name: "Compute Server", slug: "compute-server", color: "4caf50" }
+
+    - name: Create Device Types
+      netbox.netbox.netbox_device_type:
+        netbox_url: "{{ nb_url }}"
+        netbox_token: "{{ nb_token }}"
+        data:
+          manufacturer: "Generic"
+          model: "{{ item.model }}"
+          slug: "{{ item.slug }}"
+          u_height: 1
+        state: present
+      loop:
+        - { model: "Switch-L3", slug: "switch-l3" }
+        - { model: "Server-1U", slug: "server-1u" }
+
+    - name: Create Rack-01
+      netbox.netbox.netbox_rack:
+        netbox_url: "{{ nb_url }}"
+        netbox_token: "{{ nb_token }}"
+        data:
+          name: "Rack-01"
+          site: "Main Lab"
+          u_height: 42
+        state: present
+
+    - name: Add Core Switch to Rack
+      netbox.netbox.netbox_device:
+        netbox_url: "{{ nb_url }}"
+        netbox_token: "{{ nb_token }}"
+        data:
+          name: "SW-01"
+          device_type: "Switch-L3"
+          device_role: "Core Switch"
+          site: "Main Lab"
+          rack: "Rack-01"
+          position: 42
+          face: "front"
+        state: present
+
+    - name: Add Servers to Rack
+      netbox.netbox.netbox_device:
+        netbox_url: "{{ nb_url }}"
+        netbox_token: "{{ nb_token }}"
+        data:
+          name: "SVR-0{{ item }}"
+          device_type: "Server-1U"
+          device_role: "Compute Server"
+          site: "Main Lab"
+          rack: "Rack-01"
+          position: "{{ item }}"
+          face: "front"
+        state: present
+      loop: [1, 2, 3]
+
+    - name: Bootstrap complete
+      debug:
+        msg:
+          - "✓ NetBox bootstrap complete"
+          - "  URL:   {{ nb_url }}"
+          - "  Token: {{ nb_token }}"

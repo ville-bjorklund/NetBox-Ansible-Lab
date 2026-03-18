@@ -1,0 +1,16 @@
+---
+# Sudo — jb needs it to install packages and manage Docker.
+# Passwordless sudo: just omit -K when running the playbooks.
+# Has a sudo password: run with -K and enter it at the prompt.
+ansible_become: true
+ansible_become_method: sudo
+
+# Where netbox-docker will be cloned on the VM
+netbox_docker_dir: /opt/netbox-docker
+
+# NetBox API endpoint (exposed via override file below)
+nb_url: "http://192.168.90.160:8000"
+
+# Admin credentials — NetBox creates this user on first boot
+nb_admin_user: "admin"
+nb_admin_pw: "Admin123!"   # ← change before going to production

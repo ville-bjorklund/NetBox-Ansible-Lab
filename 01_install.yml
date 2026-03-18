@@ -1,0 +1,189 @@
+---
+# 01_install.yml
+# Installs Docker CE + netbox-docker on a bare Ubuntu VM.
+# Safe to re-run — all tasks are idempotent.
+#
+# No extra collections required — uses only built-in Ansible modules + shell.
+#
+# Run:
+#   ansible-playbook -i inventory 01_install.yml
+
+- name: Wait for VM to be reachable
+  hosts: ville_netbox
+  gather_facts: no
+  become: no
+
+  tasks:
+    - name: Wait for SSH (up to 100s, 5s between attempts)
+      wait_for_connection:
+        delay: 0
+        timeout: 100
+        sleep: 5
+        connect_timeout: 5
+
+- name: Install Docker and NetBox
+  hosts: ville_netbox
+  become: yes
+
+  vars:
+    # Pin to a specific netbox-docker release tag.
+    # Find latest at: https://github.com/netbox-community/netbox-docker/releases
+    netbox_docker_version: "3.2.0"
+    netbox_docker_dir: /opt/netbox-docker
+    nb_url: "http://192.168.90.160:8000"
+    nb_admin_user: "admin"
+    nb_admin_pw: "Admin123!"
+    nb_allowed_hosts: "netbox.ville.bjorklund.cn 192.168.90.160 localhost"
+
+  tasks:
+
+    # ── 1. System packages ────────────────────────────────────────────────────
+
+    - name: Wait for cloud-init and apt to finish (fresh VMs run apt on first boot)
+      shell: |
+        # Wait for cloud-init to complete first
+        cloud-init status --wait 2>/dev/null || true
+        # Then wait for any remaining apt/dpkg locks to clear
+        while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
+          echo "Waiting for apt lock..."
+          sleep 5
+        done
+      changed_when: false
+      timeout: 600
+
+    - name: Remove legacy Docker packages if present
+      apt:
+        name:
+          - docker.io
+          - docker-doc
+          - docker-compose        # old v1 binary — conflicts with v2 plugin
+          - podman-docker
+          - containerd
+          - runc
+        state: absent
+        purge: yes
+
+    - name: Install prerequisites
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - git
+        state: present
+        update_cache: yes
+
+    # ── 2. Docker CE (official repo) ──────────────────────────────────────────
+
+    - name: Create apt keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Docker GPG key
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+        chmod 0644 /etc/apt/keyrings/docker.asc
+      args:
+        creates: /etc/apt/keyrings/docker.asc
+
+    - name: Add Docker apt repository
+      apt_repository:
+        repo: >-
+          deb [arch={{ ansible_architecture | replace('x86_64','amd64') }}
+          signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/ubuntu
+          {{ ansible_distribution_release }} stable
+        filename: docker
+        state: present
+
+    - name: Install Docker CE and Compose plugin
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin   # provides "docker compose" (v2)
+        state: present
+        update_cache: yes
+
+    - name: Enable and start Docker
+      systemd:
+        name: docker
+        enabled: yes
+        state: started
+
+    - name: Add ansible user to the docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    # ── 3. netbox-docker ──────────────────────────────────────────────────────
+
+    - name: Check if netbox-docker already cloned
+      stat:
+        path: "{{ netbox_docker_dir }}/.git"
+      register: netbox_git_dir
+
+    - name: Clone netbox-docker
+      git:
+        repo: https://github.com/netbox-community/netbox-docker.git
+        dest: "{{ netbox_docker_dir }}"
+        version: "{{ netbox_docker_version }}"
+        force: no
+      when: not netbox_git_dir.stat.exists
+
+    - name: Expose NetBox on port 8000 (docker-compose.override.yml)
+      # netbox-docker does NOT expose any port by default — this is required.
+      copy:
+        dest: "{{ netbox_docker_dir }}/docker-compose.override.yml"
+        content: |
+          services:
+            netbox:
+              ports:
+                - "8000:8080"
+        mode: "0644"
+
+    - name: Set admin credentials in netbox.env
+      lineinfile:
+        path: "{{ netbox_docker_dir }}/env/netbox.env"
+        regexp: "^{{ item.key }}="
+        line: "{{ item.key }}={{ item.value }}"
+      loop:
+        - { key: "SUPERUSER_NAME",     value: "{{ nb_admin_user }}" }
+        - { key: "SUPERUSER_PASSWORD", value: "{{ nb_admin_pw }}" }
+        - { key: "SUPERUSER_EMAIL",    value: "admin@lab.local" }
+        - { key: "ALLOWED_HOSTS",      value: "{{ nb_allowed_hosts }}" }
+
+    # ── 4. Start containers ───────────────────────────────────────────────────
+
+    - name: Pull NetBox images
+      shell: docker compose pull
+      args:
+        chdir: "{{ netbox_docker_dir }}"
+
+    - name: Start NetBox containers (no health wait — Ansible polls below)
+      shell: docker compose up -d || true
+      args:
+        chdir: "{{ netbox_docker_dir }}"
+
+    # ── 5. Health check ───────────────────────────────────────────────────────
+    # NetBox runs migrations and creates the superuser on first boot.
+    # This takes 3-5 minutes — we wait up to 10.
+    # /api/ returns 403 when unauthenticated — that's fine, it means NetBox is up.
+
+    - name: Wait for NetBox to become ready (up to 10 min)
+      uri:
+        url: "{{ nb_url }}/api/"
+        status_code: [200, 403]
+      register: nb_health
+      retries: 120
+      delay: 5
+      until: nb_health.status in [200, 403]
+
+    - name: NetBox is up
+      debug:
+        msg: "✓ NetBox is running at {{ nb_url }}"

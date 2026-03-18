@@ -1,0 +1,7 @@
+---
+# site.yml
+# Run:
+#   ansible-playbook -i inventory site.yml
+
+- import_playbook: 01_install.yml
+- import_playbook: 02_bootstrap.yml

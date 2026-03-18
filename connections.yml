@@ -1,0 +1,16 @@
+connections:
+  - server: SVR-01
+    interfaces:
+      - { name: eth0,  switch_port: "GigabitEthernet0/1" }
+      - { name: eth1,  switch_port: "GigabitEthernet0/2" }
+      - { name: ipmi0, switch_port: "GigabitEthernet0/3", type: ipmi }
+  - server: SVR-02
+    interfaces:
+      - { name: eth0,  switch_port: "GigabitEthernet0/4" }
+      - { name: eth1,  switch_port: "GigabitEthernet0/5" }
+      - { name: ipmi0, switch_port: "GigabitEthernet0/6", type: ipmi }
+  - server: SVR-03
+    interfaces:
+      - { name: eth0,  switch_port: "GigabitEthernet0/7" }
+      - { name: eth1,  switch_port: "GigabitEthernet0/8" }
+      - { name: ipmi0, switch_port: "GigabitEthernet0/9", type: ipmi }

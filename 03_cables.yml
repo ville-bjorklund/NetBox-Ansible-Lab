@@ -1,0 +1,49 @@
+- name: Add interfaces and cables
+  hosts: localhost
+  connection: local
+  become: no
+
+  vars:
+    nb_url: "http://192.168.90.160:8000"
+    nb_token: "76d0472ba61b2ba0553e488b121cec453db06888"
+    connections: "{{ lookup('file', 'connections.yml') | from_yaml | json_query('connections') }}"
+
+  tasks:
+
+    - name: Create server interfaces
+      netbox.netbox.netbox_device_interface:
+        netbox_url: "{{ nb_url }}"
+        netbox_token: "{{ nb_token }}"
+        data:
+          device: "{{ item.0.server }}"
+          name: "{{ item.1.name }}"
+          type: "1000base-t"
+        state: present
+      loop: "{{ connections | subelements('interfaces') }}"
+
+    - name: Create switch ports
+      netbox.netbox.netbox_device_interface:
+        netbox_url: "{{ nb_url }}"
+        netbox_token: "{{ nb_token }}"
+        data:
+          device: SW-01
+          name: "{{ item.1.switch_port }}"
+          type: "1000base-t"
+        state: present
+      loop: "{{ connections | subelements('interfaces') }}"
+
+    - name: Connect servers to switch
+      netbox.netbox.netbox_cable:
+        netbox_url: "{{ nb_url }}"
+        netbox_token: "{{ nb_token }}"
+        data:
+          termination_a_type: dcim.interface
+          termination_a:
+            device: "{{ item.0.server }}"
+            name: "{{ item.1.name }}"
+          termination_b_type: dcim.interface
+          termination_b:
+            device: SW-01
+            name: "{{ item.1.switch_port }}"
+        state: present
+      loop: "{{ connections | subelements('interfaces') }}"
